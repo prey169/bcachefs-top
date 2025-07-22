@@ -112,7 +112,7 @@ fn process_file(path: &str) -> io::Result<Option<u128>> {
     Ok(None)
 }
 
-pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
+pub fn run_tui(time: u64, bcachefs_dir: &str, refresh: bool) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -126,7 +126,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
 
     let bcachefs_counters_dir = format!("{bcachefs_dir}/counters/");
     let mut curr_stats = process_directory(&bcachefs_counters_dir)?;
-    let mut prev_stats = curr_stats.clone();
+    let mut starting_stats = curr_stats.clone();
 
     let mut sort_algo = SortedBy::AlphabeticalAscending;
     let mut alphabetical_sort: Vec<_> = curr_stats.clone().into_keys().collect();
@@ -166,7 +166,9 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
         }
 
         if last_refresh.elapsed().unwrap_or(Duration::from_secs(0)) >= refresh_rate {
-            prev_stats = curr_stats.clone();
+            if refresh {
+                starting_stats = curr_stats.clone();
+            }
             curr_stats = process_directory(&bcachefs_counters_dir)?;
             last_refresh = SystemTime::now();
         } else if force_refresh {
@@ -175,7 +177,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
             continue;
         }
 
-        let diffs = calculate_diffs(&prev_stats, &curr_stats);
+        let diffs = calculate_diffs(&starting_stats, &curr_stats);
 
         terminal.draw(|frame| {
             let chunks = Layout::default()

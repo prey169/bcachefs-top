@@ -27,6 +27,7 @@ Usage: bcachefs-top [OPTIONS]
 Options:
   -j, --json
   -t, --time <TIME>  [default: 2]
+  -r, --refresh
   -h, --help         Print help
 ```
 
