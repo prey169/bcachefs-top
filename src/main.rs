@@ -13,9 +13,6 @@ struct Args {
 
     #[arg(short, long, default_value = "2")]
     time: u64,
-
-    #[arg(short, long, default_value = "false")]
-    refresh: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -57,6 +54,6 @@ fn main() -> io::Result<()> {
         println!("{json_stats}");
         Ok(())
     } else {
-        run_tui(args.time, &bcachefs_dir, args.refresh)
+        run_tui(args.time, &bcachefs_dir)
     }
 }

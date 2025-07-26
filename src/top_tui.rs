@@ -7,10 +7,9 @@ use ratatui::{
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Layout},
-    prelude::Stylize,
+    prelude::*,
     style::Color,
-    text::Line,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Row, Table, TableState},
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -112,7 +111,7 @@ fn process_file(path: &str) -> io::Result<Option<u128>> {
     Ok(None)
 }
 
-pub fn run_tui(time: u64, bcachefs_dir: &str, refresh: bool) -> io::Result<()> {
+pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -126,7 +125,8 @@ pub fn run_tui(time: u64, bcachefs_dir: &str, refresh: bool) -> io::Result<()> {
 
     let bcachefs_counters_dir = format!("{bcachefs_dir}/counters/");
     let mut curr_stats = process_directory(&bcachefs_counters_dir)?;
-    let mut starting_stats = curr_stats.clone();
+    let starting_stats = curr_stats.clone();
+    let mut previous_stats = curr_stats.clone();
 
     let mut sort_algo = SortedBy::AlphabeticalAscending;
     let mut alphabetical_sort: Vec<_> = curr_stats.clone().into_keys().collect();
@@ -166,9 +166,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str, refresh: bool) -> io::Result<()> {
         }
 
         if last_refresh.elapsed().unwrap_or(Duration::from_secs(0)) >= refresh_rate {
-            if refresh {
-                starting_stats = curr_stats.clone();
-            }
+            previous_stats = curr_stats.clone();
             curr_stats = process_directory(&bcachefs_counters_dir)?;
             last_refresh = SystemTime::now();
         } else if force_refresh {
@@ -177,46 +175,64 @@ pub fn run_tui(time: u64, bcachefs_dir: &str, refresh: bool) -> io::Result<()> {
             continue;
         }
 
-        let diffs = calculate_diffs(&starting_stats, &curr_stats);
+        let total_diffs = calculate_diffs(&starting_stats, &curr_stats);
+        let diffs = calculate_diffs(&previous_stats, &curr_stats);
 
         terminal.draw(|frame| {
             let chunks = Layout::default()
                 .constraints([Constraint::Percentage(100)])
                 .split(frame.area());
-            let mut stats_text = vec![];
+            let mut stats_text = vec![Row::new(vec![
+                "".to_string(),
+                format!("{}s", time),
+                "Total".to_string(),
+            ])];
 
             let push_stats_line =
                 |key: &String,
-                 stats_text: &mut Vec<Line>,
-                 curr_stats: &HashMap<String, u128>,
-                 diffs: &HashMap<String, u128>| {
-                    stats_text.push(Line::from(vec![
-                        format!("{key}: ").fg(Color::Yellow),
-                        format!("{}", curr_stats[key]).into(),
-                        format!(" (Diff: +{})", diffs[key]).fg(Color::Green),
-                    ]));
+                 stats_text: &mut Vec<Row>,
+                 diffs: &HashMap<String, u128>,
+                 total_diffs: &HashMap<String, u128>| {
+                    if total_diffs[key] != 0 {
+                        stats_text.push(Row::new(vec![
+                            Text::styled(format!("{key}:"), Style::default().fg(Color::Yellow)),
+                            Text::from(format!("{}", diffs[key])),
+                            Text::styled(
+                                format!("{}", total_diffs[key]),
+                                Style::default().fg(Color::Green),
+                            ),
+                        ]));
+                    }
                 };
-
             if sort_algo == SortedBy::AlphabeticalAscending {
                 for key in &alphabetical_sort {
-                    push_stats_line(key, &mut stats_text, &curr_stats, &diffs);
+                    push_stats_line(key, &mut stats_text, &diffs, &total_diffs);
                 }
             } else if sort_algo == SortedBy::DifferentialDescending {
-                let mut diff_sort: Vec<_> = diffs.iter().collect();
+                let mut diff_sort: Vec<_> = total_diffs.iter().collect();
                 diff_sort.sort_by(|a, b| b.1.cmp(a.1));
                 for key in &diff_sort {
-                    push_stats_line(key.0, &mut stats_text, &curr_stats, &diffs);
+                    push_stats_line(key.0, &mut stats_text, &diffs, &total_diffs);
                 }
             }
 
             let max_visible_lines = chunks[0].height.saturating_sub(2);
-            scroll_offset = scroll_offset
+            let scroll_offset = scroll_offset
                 .min(stats_text.len().saturating_sub(max_visible_lines as usize) as u16);
 
-            let paragraph = Paragraph::new(stats_text)
-                .block(Block::default().borders(Borders::ALL).title("bcachefs-top"))
-                .scroll((scroll_offset, 0));
-            frame.render_widget(paragraph, chunks[0]);
+            let table = Table::default()
+                .rows(stats_text)
+                .widths(&[
+                    Constraint::Length(66),
+                    Constraint::Length(20),
+                    Constraint::Length(20),
+                ])
+                .block(Block::default().borders(Borders::ALL).title("bcachefs-top"));
+
+            let mut table_state = TableState::default();
+            table_state.select(Some(scroll_offset as usize));
+
+            frame.render_stateful_widget(table, chunks[0], &mut table_state);
         })?;
     }
 
