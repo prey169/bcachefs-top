@@ -11,40 +11,43 @@ use ratatui::{
     style::Color,
     widgets::{Block, Borders, Row, Table, TableState},
 };
-use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{File, read_dir},
-    io::{self, BufRead, BufReader, stdout},
+    ffi::OsString,
+    io::{self, stdout},
     time::{Duration, SystemTime},
 };
+
+use crate::ioctl::{BCH2_COUNTER_NAMES, process_counters};
 
 #[derive(PartialEq)]
 enum SortedBy {
     AlphabeticalAscending,
+    CounterIDsAscending,
     DifferentialDescending,
 }
 
 impl SortedBy {
     fn toggle(&self) -> Self {
         match self {
-            SortedBy::AlphabeticalAscending => SortedBy::DifferentialDescending,
+            SortedBy::AlphabeticalAscending => SortedBy::CounterIDsAscending,
+            SortedBy::CounterIDsAscending => SortedBy::DifferentialDescending,
             SortedBy::DifferentialDescending => SortedBy::AlphabeticalAscending,
+        }
+    }
+    fn print(&self) -> String {
+        match self {
+            SortedBy::AlphabeticalAscending => "AlphabeticalAscending".to_string(),
+            SortedBy::CounterIDsAscending => "CounterIDsAscending".to_string(),
+            SortedBy::DifferentialDescending => "DifferentialDescending".to_string(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct DataSize {
-    file_name: String,
-    value: u64,
-}
-
 pub fn calculate_diffs(
-    prev: &HashMap<String, u128>,
-    curr: &HashMap<String, u128>,
-) -> HashMap<String, u128> {
+    prev: &HashMap<String, u64>,
+    curr: &HashMap<String, u64>,
+) -> HashMap<String, u64> {
     let mut result = HashMap::new();
     for (key, value) in curr {
         let diff = value - prev[key];
@@ -53,65 +56,7 @@ pub fn calculate_diffs(
     result
 }
 
-fn parse_data_size(line: &str) -> Option<u128> {
-    let re = Regex::new(r"(\d+\.?\d*)\s*(KiB|MiB|GiB|TiB|PiB|EiB|ZiB|YiB)?").unwrap();
-    if let Some(captures) = re.captures(line) {
-        let value: f64 = captures.get(1)?.as_str().parse().ok()?;
-        let bytes = if let Some(unit) = captures.get(2) {
-            let multiplier = match unit.as_str() {
-                "KiB" => 1024u128,
-                "MiB" => 1024u128.pow(2),
-                "GiB" => 1024u128.pow(3),
-                "TiB" => 1024u128.pow(4),
-                "PiB" => 1024u128.pow(5),
-                "EiB" => 1024u128.pow(6),
-                "ZiB" => 1024u128.pow(7),
-                "YiB" => 1024u128.pow(8),
-                _ => 1,
-            };
-            (value * multiplier as f64) as u128
-        } else {
-            value as u128
-        };
-        Some(bytes)
-    } else {
-        None
-    }
-}
-
-pub fn process_directory(dir: &str) -> io::Result<HashMap<String, u128>> {
-    let mut results = HashMap::new();
-
-    for entry in read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if let Ok(Some(bytes)) = process_file(path.to_str().unwrap_or("")) {
-                    results.insert(file_name.to_string(), bytes);
-                }
-            }
-        }
-    }
-
-    Ok(results)
-}
-fn process_file(path: &str) -> io::Result<Option<u128>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.contains("since mount") {
-            if let Some(bytes) = parse_data_size(&line) {
-                return Ok(Some(bytes));
-            }
-        }
-    }
-    Ok(None)
-}
-
-pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
+pub fn run_tui(time: u64, path: Option<OsString>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -123,8 +68,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
     let mut last_refresh = SystemTime::now();
     let mut force_refresh = true;
 
-    let bcachefs_counters_dir = format!("{bcachefs_dir}/counters/");
-    let mut curr_stats = process_directory(&bcachefs_counters_dir)?;
+    let mut curr_stats = process_counters(path.clone());
     let starting_stats = curr_stats.clone();
     let mut previous_stats = curr_stats.clone();
 
@@ -132,6 +76,8 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
     let mut alphabetical_sort: Vec<_> = curr_stats.clone().into_keys().collect();
     alphabetical_sort.sort_unstable();
     let mut scroll_offset: u16 = 0;
+
+    let len = alphabetical_sort.len();
 
     loop {
         if event::poll(Duration::from_millis(100))? {
@@ -167,7 +113,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
 
         if last_refresh.elapsed().unwrap_or(Duration::from_secs(0)) >= refresh_rate {
             previous_stats = curr_stats.clone();
-            curr_stats = process_directory(&bcachefs_counters_dir)?;
+            curr_stats = process_counters(path.clone());
             last_refresh = SystemTime::now();
         } else if force_refresh {
             force_refresh = false;
@@ -183,7 +129,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
                 .constraints([Constraint::Percentage(100)])
                 .split(frame.area());
             let mut stats_text = vec![Row::new(vec![
-                "".to_string(),
+                format!("Sorted by: {}", sort_algo.print()),
                 format!("{}s", time),
                 "Total".to_string(),
             ])];
@@ -191,8 +137,8 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
             let push_stats_line =
                 |key: &String,
                  stats_text: &mut Vec<Row>,
-                 diffs: &HashMap<String, u128>,
-                 total_diffs: &HashMap<String, u128>| {
+                 diffs: &HashMap<String, u64>,
+                 total_diffs: &HashMap<String, u64>| {
                     if total_diffs[key] != 0 {
                         stats_text.push(Row::new(vec![
                             Text::styled(format!("{key}:"), Style::default().fg(Color::Yellow)),
@@ -214,6 +160,13 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
                 for key in &diff_sort {
                     push_stats_line(key.0, &mut stats_text, &diffs, &total_diffs);
                 }
+            } else if sort_algo == SortedBy::CounterIDsAscending {
+                for (i, key) in BCH2_COUNTER_NAMES.iter().enumerate() {
+                    if i == len {
+                        break;
+                    }
+                    push_stats_line(&key.to_string(), &mut stats_text, &diffs, &total_diffs);
+                }
             }
 
             let max_visible_lines = chunks[0].height.saturating_sub(2);
@@ -222,7 +175,7 @@ pub fn run_tui(time: u64, bcachefs_dir: &str) -> io::Result<()> {
 
             let table = Table::default()
                 .rows(stats_text)
-                .widths(&[
+                .widths([
                     Constraint::Length(66),
                     Constraint::Length(20),
                     Constraint::Length(20),
