@@ -22,7 +22,10 @@ or download this repo and `cargo build --release`
 
 # usage
 ```
-Usage: bcachefs-top [OPTIONS]
+Usage: bcachefs-top [OPTIONS]  [-- [PATH]]
+
+Arguments:
+  [PATH] 
 
 Options:
   -j, --json
